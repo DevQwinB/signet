@@ -354,7 +354,7 @@ jobs:
         run: pnpm --filter @signet/web build
 
       - name: Run the linked-flow e2e
-        run: pnpm --filter @signet/web exec playwright test e2e/claim-link-profile.spec.ts
+        run: pnpm --filter @signet/web exec playwright test e2e/claim-link-profile.spec.ts e2e/contract-a11y.spec.ts
 
       # This spec crosses four systems, so a failure is worth more than a log
       # line: the trace and the page snapshot say which stage broke.
