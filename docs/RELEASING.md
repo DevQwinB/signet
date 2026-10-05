@@ -31,6 +31,7 @@ PATCH (0.0.X) -> Backwards-compatible bug fixes, security patches, internal refa
 All releases are tracked via Git tags pushed to `main`:
 
 - **Platform Releases**: `vX.Y.Z` (e.g. `v0.1.0`) — Tracks coordinated platform deployments.
+- **CLI Releases**: `cli-vX.Y.Z` (e.g. `cli-v0.1.0`) — Tracks `signet` CLI and `signet-simulator` binary releases.
 - **SDK Package Releases**: `sdk-vX.Y.Z` (e.g. `sdk-v0.1.0`) — Tracks npm releases of `@signet/sdk`.
 - **Contract Releases**: `contract-vX.Y.Z` (e.g. `contract-v0.1.0`) — Tracks verified contract build hashes and on-chain deployment references.
 
@@ -86,6 +87,15 @@ git push origin sdk-vX.Y.Z
 
 Create a GitHub Release describing the changes and referencing the tag.
 
+Pushing a `cli-vX.Y.Z` tag (or running `workflow_dispatch` against an existing one) runs `.github/workflows/release-cli.yml`:
+
+1. The `simulator` job calls the reusable `.github/workflows/build-simulator.yml`, which builds `signet-simulator` natively (`cargo build --release --locked -p signet-simulator --target ...`, then strip and a `--version` check) on linux/x64, linux/arm64, darwin/arm64, darwin/x64 (cross-built on the arm64 runner) and windows/x64 runners, one `simulator-<platform>` artifact each. The Linux simulators are `*-unknown-linux-gnu` built on Ubuntu 24.04, so they need glibc 2.39 or newer; the Go binary is static and has no such floor.
+2. The `release` job (`needs: simulator`) downloads those artifacts and runs `scripts/release/build-cli.sh` with `SIMULATOR_DIR` pointing at them. For each platform that cross-compiles `signet`, stages the npm package with both binaries side by side, and builds one archive, `signet-<version>-<platform>.tar.gz` (`.zip` on Windows), with `signet[.exe]` and `signet-simulator[.exe]` at the top level. A missing simulator fails the job.
+3. `checksums.txt` covers the archives; the archives and `checksums.txt` are what the GitHub Release carries (the bare binaries are not uploaded).
+4. Publishing to GitHub Releases and npm is gated on `vars.CLI_RELEASE_ENABLED == 'true'`.
+
+Every simulator job and the assembling `release` job run in the same workflow run at the same tag, which is what keeps "same release = same protocol version" true ([CLI_RUST_BRIDGE.md](./CLI_RUST_BRIDGE.md) section 5). Do not move the simulator build into a separate workflow or tag.
+
 ### Phase 4: Package & Contract Deployment
 
 1. **Publishing `@signet/sdk`**:
@@ -99,18 +109,21 @@ Create a GitHub Release describing the changes and referencing the tag.
 
 ### CLI release dry run
 
-The real CLI release (`.github/workflows/release-cli.yml`, triggered by a `cli-v*.*.*` tag) is maintainer-only, so a broken `package.json`, shim or staging script would otherwise surface only while releasing. `.github/workflows/release-cli-dry-run.yml` rehearses it on every pull request that touches `cli/**`, `scripts/release/**` or either release workflow, without publishing anything (read-only token, no `NPM_TOKEN`, no `production` environment, no GitHub Release).
+The real CLI release (`.github/workflows/release-cli.yml`, triggered by a `cli-v*.*.*` tag) is maintainer-only, so a broken `package.json`, shim or staging script would otherwise surface only while releasing. `.github/workflows/release-cli-dry-run.yml` rehearses it on every pull request that touches `cli/**`, `sandbox/**`, `scripts/release/**` or one of the release workflows, without publishing anything (read-only token, no `NPM_TOKEN`, no `production` environment, no GitHub Release).
 
-- **Same steps as the release.** Both workflows run `scripts/release/build-cli.sh`, which cross-compiles every target, stages each `@signet/cli-<platform>` package, writes `cli/dist/checksums.txt` and pins the `@signet/cli` shim. The dry run uses the version `0.0.0-dryrun.<12-char head sha>`. Change the build in that script, not in a workflow, so the two cannot drift.
-- **`build` job.** Lints the two release workflows with a pinned, checksum-verified `actionlint`, runs the build script, `npm pack`s every package under `cli/npm/` (the shim plus one per platform) and uploads the tarballs as the `cli-tarballs` artifact.
-- **`install` job.** On ubuntu, macOS and Windows, installs the shim plus that OS's platform package from the tarballs into a temp directory (`npm install ./*.tgz`), then runs `npx signet --version` and `npx signet --help`. It asserts exit code 0 and that the `--version` output contains the dry-run version.
+- **Same steps as the release.** Both workflows run `scripts/release/build-cli.sh`, which cross-compiles every target, stages each `@signet/cli-<platform>` package with `signet` and `signet-simulator`, builds the per-platform archives, writes `cli/dist/checksums.txt` and pins the `@signet/cli` shim. Both also call `build-simulator.yml`, so the native simulator matrix has one definition. The dry run uses the version `0.0.0-dryrun.<12-char head sha>`. Change the build in that script, not in a workflow, so the two cannot drift.
+- **`simulator` job.** Builds the simulator on all five native runners, as the release does.
+- **`build` job.** Lints the three release workflows with a pinned, checksum-verified `actionlint`, runs the build script with `SIMULATOR_DIR`, checks that `checksums.txt` verifies and that every archive holds exactly both binaries, `npm pack`s every package under `cli/npm/` (the shim plus one per platform) and uploads the tarballs as the `cli-tarballs` artifact.
+- **`install` job.** On ubuntu, macOS and Windows, installs the shim plus that OS's platform package from the tarballs into a temp directory (`npm install ./*.tgz`), then runs `signet-simulator --version` from the installed package's `bin/` directory (asserting it prints `signet-simulator`), and `npx signet --version` and `npx signet --help`. It asserts exit code 0 and that the `--version` output contains the dry-run version.
 
-To reproduce the build locally (all targets, or a subset with `BUILD_ONLY`):
+To reproduce the build locally (all targets, or a subset with `BUILD_ONLY`). Without `SIMULATOR_DIR` the script builds and stages `signet` only; to include the simulator, put a built one at `<dir>/simulator-<platform>/signet-simulator` and set `SIMULATOR_DIR=<dir>`:
 
 ```bash
 VERSION=0.0.0-dryrun.local BUILD_ONLY="cli-linux-x64" scripts/release/build-cli.sh
-git checkout -- cli/npm   # discard the staged binary and pinned versions
+git checkout -- cli/npm   # discard the staged binaries and pinned versions
 ```
+
+What the dry run cannot show: it never creates a GitHub Release or publishes to npm, and it does not exercise `softprops/action-gh-release` or `npm publish --provenance`. A real `cli-v*.*.*` tag run (or `workflow_dispatch` on a fork test tag) is the only check of those.
 
 Publishing is unchanged: only `release-cli.yml`, on a tag, and only when `vars.CLI_RELEASE_ENABLED == 'true'`.
 

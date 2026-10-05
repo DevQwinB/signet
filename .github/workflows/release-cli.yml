@@ -1,16 +1,31 @@
 name: Release CLI
 
-# Cross-compiles the signet CLI for its target platforms, publishes
-# checksummed binaries to a GitHub Release, and publishes the npm wrapper
-# (@signet/cli) plus one platform-specific optionalDependency package per
-# target — the pattern esbuild, swc, and turbo use, since `npx` executes
-# JavaScript and cannot run a Go binary directly.
+# Builds the signet CLI (Go, cross-compiled) and the signet-simulator (Rust,
+# built natively per target), publishes per-platform archives holding BOTH
+# binaries plus `checksums.txt` to a GitHub Release, and publishes the npm
+# wrapper (@signet/cli) plus one platform-specific optionalDependency package
+# per target, each also holding both binaries — the pattern esbuild, swc, and
+# turbo use, since `npx` executes JavaScript and cannot run a Go binary
+# directly.
+#
+# docs/CLI_RUST_BRIDGE.md section 5 wants both binaries of a release built from
+# the same tag in "one release job". A Rust binary embedding `wasmi` does not
+# cross-compile to macOS from Linux without an Apple SDK, so the simulator is
+# built by a matrix of native jobs (build-simulator.yml, reusable). The
+# invariant is kept by construction: every matrix job and the assembling
+# `release` job run in THIS one workflow run, check out the same tag, and the
+# `release` job (`needs: simulator`) is the only place the two binaries meet.
+# Never split the matrix into a separate workflow or a separate tag.
 #
 # Go cross-compiles cleanly from one runner (just GOOS/GOARCH env vars, no
-# cgo — see cli/go.mod's no-cgo requirement), so this is a single job rather
-# than a build matrix with artifacts to shuffle between jobs. The build itself
-# is scripts/release/build-cli.sh, also run by the PR dry run
-# (release-cli-dry-run.yml) so the two cannot drift.
+# cgo — see cli/go.mod's no-cgo requirement). The assembly (Go build, staging,
+# archives, checksums, shim pin) is scripts/release/build-cli.sh, also run by
+# the PR dry run (release-cli-dry-run.yml), which calls the same
+# build-simulator.yml, so the two cannot drift.
+#
+# glibc floor: the Linux simulators are *-unknown-linux-gnu built on Ubuntu
+# 24.04 runners, so they need glibc >= 2.39. The Go binary is static; only the
+# simulator has this floor.
 #
 # OPT-IN, like deploy.yml: the actual publish steps are gated on
 # `vars.CLI_RELEASE_ENABLED == 'true'`, so they no-op for forks and until:
@@ -38,8 +53,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  simulator:
+    name: build simulator
+    uses: ./.github/workflows/build-simulator.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+    permissions:
+      contents: read
+
   release:
     name: build, checksum, and publish
+    needs: simulator
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
@@ -59,6 +83,12 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
+      # One artifact per target, simulator-<npm_pkg>/signet-simulator[.exe].
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: simulator-*
+          path: simulator-artifacts
+
       - name: Resolve version
         id: version
         run: |
@@ -66,13 +96,14 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#cli-v}" >> "$GITHUB_OUTPUT"
 
-      # The cross-compile loop, per-package staging, checksums and shim pin
-      # live in scripts/release/build-cli.sh, shared with the PR dry run
-      # (release-cli-dry-run.yml) so the two cannot drift.
-      - name: Build every target, stage each npm platform package, checksum, pin shim
+      # The cross-compile loop, per-package staging (both binaries), archives,
+      # checksums and shim pin live in scripts/release/build-cli.sh, shared with
+      # the PR dry run (release-cli-dry-run.yml) so the two cannot drift.
+      - name: Build every target, stage npm packages, archive, checksum, pin shim
         env:
           VERSION: ${{ steps.version.outputs.version }}
           COMMIT: ${{ github.sha }}
+          SIMULATOR_DIR: simulator-artifacts
         run: scripts/release/build-cli.sh
 
       - name: Create GitHub Release
@@ -81,7 +112,9 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: signet CLI ${{ steps.version.outputs.version }}
           files: |
-            cli/dist/*
+            cli/dist/*.tar.gz
+            cli/dist/*.zip
+            cli/dist/checksums.txt
           generate_release_notes: true
 
       - name: Publish npm packages

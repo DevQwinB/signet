@@ -1,0 +1,120 @@
+name: Build simulator
+
+# Reusable workflow: builds signet-simulator natively for every CLI release
+# target and uploads one artifact per target, named simulator-<npm_pkg>, each
+# holding signet-simulator[.exe]. Called by release-cli.yml (real release) and
+# release-cli-dry-run.yml (PR rehearsal) so the target matrix has ONE
+# definition and cannot drift between them. The consumer downloads
+# `simulator-*` and hands the directory to scripts/release/build-cli.sh as
+# SIMULATOR_DIR.
+#
+# Why native runners: a Rust binary embedding `wasmi` and two host lanes does
+# not cross-compile to macOS from Linux without an Apple SDK.
+#
+# glibc floor: the Linux simulators target *-unknown-linux-gnu and are linked
+# on ubuntu-latest / ubuntu-24.04-arm (Ubuntu 24.04, glibc 2.39), so they need
+# glibc >= 2.39 at runtime. The Go signet binary is static and has no such
+# floor; only the simulator does. Switch to *-unknown-linux-musl if older
+# distros must be supported.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to build (empty = the calling workflow event ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  simulator:
+    name: simulator (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: sandbox
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cli-linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: signet-simulator
+          - name: cli-linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            bin: signet-simulator
+          - name: cli-darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin: signet-simulator
+          # Built on the arm64 runner with the x86_64 target; Rosetta on
+          # macos-14 runs the result for the --version check.
+          - name: cli-darwin-x64
+            os: macos-14
+            target: x86_64-apple-darwin
+            bin: signet-simulator
+          - name: cli-windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: signet-simulator.exe
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      # sandbox/rust-toolchain.toml pins the exact toolchain; rustup installs it
+      # on the first cargo/rustup call inside sandbox/. The target is added
+      # below, to that pinned toolchain (the action's `targets:` input would add
+      # it to `stable` instead).
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add the Rust target to the pinned toolchain
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            sandbox/target
+          key: cargo-simulator-${{ matrix.target }}-${{ hashFiles('sandbox/Cargo.lock') }}
+
+      - name: Build simulator
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked -p signet-simulator --target "$TARGET"
+
+      - name: Strip binary (Unix)
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: strip "target/${TARGET}/release/signet-simulator"
+
+      - name: Verify simulator version
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ matrix.bin }}
+        run: |
+          set -euo pipefail
+          out="$("target/${TARGET}/release/${BIN}" --version)"
+          echo "$out"
+          case "$out" in
+            signet-simulator*) ;;
+            *) echo "::error::unexpected --version output"; exit 1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: simulator-${{ matrix.name }}
+          path: sandbox/target/${{ matrix.target }}/release/${{ matrix.bin }}
+          if-no-files-found: error

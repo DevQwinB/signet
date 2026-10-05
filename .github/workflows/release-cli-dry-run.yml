@@ -3,12 +3,14 @@ name: Release CLI dry run
 # Rehearses release-cli.yml on pull requests so a broken package.json, shim or
 # staging script is found in review, not when a maintainer cuts a release.
 #
-# It runs the same scripts/release/build-cli.sh as the real release (build every
-# target, stage each npm platform package, checksum, pin the shim) at the
-# throwaway version 0.0.0-dryrun.<sha>, `npm pack`s every package, and uploads
-# the tarballs. A second job then installs the shim plus that OS's platform
-# package from the tarballs on ubuntu, macos and windows, and runs the installed
-# `signet` through npx.
+# It builds the simulator with the same reusable workflow as the real release
+# (build-simulator.yml: native build on all five targets), then runs the same
+# scripts/release/build-cli.sh (build every target, stage each npm platform
+# package with signet AND signet-simulator, archive, checksum, pin the shim) at
+# the throwaway version 0.0.0-dryrun.<sha>, `npm pack`s every package, and
+# uploads the tarballs. A second job then installs the shim plus that OS's
+# platform package from the tarballs on ubuntu, macos and windows, and runs the
+# installed `signet` through npx and the installed `signet-simulator` directly.
 #
 # Nothing is published or released: read-only token, no NPM_TOKEN, no
 # `environment: production`, no GitHub Release.
@@ -17,8 +19,10 @@ on:
   pull_request:
     paths:
       - 'cli/**'
+      - 'sandbox/**'
       - 'scripts/release/**'
       - '.github/workflows/release-cli.yml'
+      - '.github/workflows/build-simulator.yml'
       - '.github/workflows/release-cli-dry-run.yml'
 
 permissions:
@@ -35,8 +39,16 @@ env:
   ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 
 jobs:
+  # The same native simulator matrix the real release uses.
+  simulator:
+    name: build simulator
+    uses: ./.github/workflows/build-simulator.yml
+    permissions:
+      contents: read
+
   build:
     name: build, stage, and pack
+    needs: simulator
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -53,6 +65,7 @@ jobs:
           echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color \
+            .github/workflows/build-simulator.yml \
             .github/workflows/release-cli.yml \
             .github/workflows/release-cli-dry-run.yml
 
@@ -64,16 +77,22 @@ jobs:
         with:
           node-version: 22
 
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: simulator-*
+          path: simulator-artifacts
+
       - name: Resolve dry-run version
         id: version
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: echo "version=0.0.0-dryrun.${HEAD_SHA::12}" >> "$GITHUB_OUTPUT"
 
-      - name: Build every target, stage each npm platform package, checksum, pin shim
+      - name: Build every target, stage npm packages, archive, checksum, pin shim
         env:
           VERSION: ${{ steps.version.outputs.version }}
           COMMIT: ${{ github.event.pull_request.head.sha }}
+          SIMULATOR_DIR: simulator-artifacts
         run: scripts/release/build-cli.sh
 
       - name: npm pack every package
@@ -86,6 +105,16 @@ jobs:
             npm pack "$dir" --pack-destination cli/dist/tarballs
           done
           ls -l cli/dist/tarballs
+          # One archive per platform plus checksums.txt, both binaries in each.
+          cat cli/dist/checksums.txt
+          test "$(wc -l < cli/dist/checksums.txt)" -eq 5
+          (cd cli/dist && sha256sum -c checksums.txt)
+          for a in cli/dist/signet-"${VERSION}"-cli-*.tar.gz; do
+            test "$(tar -tzf "$a" | sort | tr '\n' ' ')" = 'signet signet-simulator ' \
+              || { echo "::error::bad archive $a"; exit 1; }
+          done
+          test "$(unzip -Z1 "cli/dist/signet-${VERSION}-cli-windows-x64.zip" | sort | tr '\n' ' ')" = 'signet-simulator.exe signet.exe ' \
+            || { echo "::error::bad windows archive"; exit 1; }
           count=$(find cli/dist/tarballs -name '*.tgz' | wc -l)
           echo "packed ${count} packages"
           test "$count" -eq "$(find cli/npm -mindepth 1 -maxdepth 1 -type d | wc -l)"
@@ -143,6 +172,26 @@ jobs:
           # of them. The four other platforms stay unmet, as intended.
           npm install --offline --no-audit --no-fund ./*.tgz
           npm ls --all || true
+
+      - name: signet-simulator runs from the installed platform package
+        env:
+          PLATFORM_PKG: ${{ matrix.platform_pkg }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/consumer"
+          bin_dir="node_modules/@signet/${PLATFORM_PKG}/bin"
+          ls -l "$bin_dir"
+          sim="$bin_dir/signet-simulator"
+          if [ -f "$sim.exe" ]; then sim="$sim.exe"; fi
+          test -f "$sim"
+          code=0
+          sim_out="$("$sim" --version)" || code=$?
+          echo "signet-simulator --version (exit ${code}): ${sim_out}"
+          test "$code" -eq 0
+          case "$sim_out" in
+            *signet-simulator*) ;;
+            *) echo "::error::simulator version output does not contain signet-simulator"; exit 1 ;;
+          esac
 
       - name: signet --version and --help run through npx
         env:
