@@ -58,9 +58,26 @@ async function expectNoHorizontalOverflow(page: Page, label: string) {
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,
   }));
-  expect(scrollWidth, `${label}: page is ${scrollWidth}px wide in a ${clientWidth}px viewport`).toBeLessThanOrEqual(
-    clientWidth,
-  );
+  if (scrollWidth > clientWidth) {
+    // Name what sticks out, so a failure says which element to fix.
+    const offenders = await page.evaluate((limit) => {
+      const describe = (el: Element) => {
+        const box = el.getBoundingClientRect();
+        const testId = el.getAttribute('data-testid');
+        const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
+        return `<${el.tagName.toLowerCase()}${testId ? ` data-testid=${testId}` : ''}> right=${Math.round(box.right)} width=${Math.round(box.width)} "${text}"`;
+      };
+      return Array.from(document.body.querySelectorAll('*'))
+        .filter((el) => el.getBoundingClientRect().right > limit + 1)
+        .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)
+        .slice(0, 6)
+        .map(describe);
+    }, clientWidth);
+    expect(
+      scrollWidth,
+      `${label}: page is ${scrollWidth}px wide in a ${clientWidth}px viewport; widest elements:\n  ${offenders.join('\n  ')}`,
+    ).toBeLessThanOrEqual(clientWidth);
+  }
 }
 
 /**

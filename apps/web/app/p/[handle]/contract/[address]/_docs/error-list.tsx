@@ -44,7 +44,10 @@ export function ErrorList({ spec, handle, address, className }: ErrorListProps) 
 
       {reference.tables.map((table) => (
         <div key={table.enumName} className="mt-8" data-testid="error-table">
-          <h3 className="text-[20px] font-bold tracking-[-0.015em] text-[#f5f4ee]" style={DISPLAY}>
+          <h3
+            className="text-[20px] font-bold tracking-[-0.015em] text-[#f5f4ee] [overflow-wrap:anywhere]"
+            style={DISPLAY}
+          >
             {table.enumName}
           </h3>
           <table className="mt-4 w-full max-w-[720px] border border-[#1f1d19] text-left [overflow-wrap:anywhere]">

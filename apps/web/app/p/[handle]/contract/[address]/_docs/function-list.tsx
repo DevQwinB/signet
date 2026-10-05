@@ -111,7 +111,7 @@ function FunctionBlock({
     >
       <h3
         id={`${section.id}-name`}
-        className="text-[20px] font-bold tracking-[-0.015em] text-[#f5f4ee]"
+        className="text-[20px] font-bold tracking-[-0.015em] text-[#f5f4ee] [overflow-wrap:anywhere]"
         style={DISPLAY}
       >
         {section.name}

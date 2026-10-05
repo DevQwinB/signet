@@ -193,7 +193,7 @@ function TypeBlock({ entry, refs }: { entry: TypeEntry; refs: Refs }) {
     >
       <h3
         id={`${entry.id}-name`}
-        className="flex flex-wrap items-baseline gap-x-3 text-[20px] font-bold tracking-[-0.015em] text-[#f5f4ee]"
+        className="flex flex-wrap items-baseline gap-x-3 text-[20px] font-bold tracking-[-0.015em] text-[#f5f4ee] [overflow-wrap:anywhere]"
         style={DISPLAY}
       >
         {entry.name}
