@@ -30,6 +30,9 @@ export function TabFocus({ children }: { children: React.ReactNode }) {
     previous.current = pathname;
     const root = container.current;
     if (!root) return;
+    // A link to `…/functions#fn-claim` (#472) is going to a section, not to the
+    // top of the tab: the browser scrolls to it and the section takes focus.
+    if (window.location.hash.length > 1) return;
 
     const focusHeading = (): boolean => {
       const heading = root.querySelector<HTMLElement>('h2');
